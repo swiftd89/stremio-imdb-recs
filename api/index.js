@@ -7,9 +7,9 @@ const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "2.3.0",
+    "version": "2.4.0",
     "name": "TasteProfile 10-Catalog Engine",
-    "description": "Deep post-2005 catalogs with IMDb badges, watch-history exclusion, and direct links.",
+    "description": "Deep post-2005 catalogs with IMDb badges, ratings, and direct links.",
     "resources": ["catalog"],
     "types": ["movie", "series"],
     "catalogs": [
@@ -66,7 +66,7 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Convert TMDB items to Stremio metas including imdbRating and external links
+// Convert TMDB items to Stremio metas with explicit IMDb badge, rating, and links
 async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
 
@@ -76,9 +76,15 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
                 `https://api.themoviedb.org/3/${endpoint}/${item.id}/external_ids?api_key=${TMDB_API_KEY}`,
                 { timeout: 2500 }
             );
-            const imdbId = extRes.data ? extRes.data.imdb_id : null;
+            const rawImdbId = extRes.data ? extRes.data.imdb_id : null;
 
-            if (!imdbId || ratedSet.has(imdbId)) {
+            // Strict check: must match standard tt... format
+            if (!rawImdbId || !/^tt\d{7,8}$/.test(rawImdbId)) {
+                return null;
+            }
+
+            // Exclude already watched
+            if (ratedSet.has(rawImdbId)) {
                 return null;
             }
 
@@ -86,18 +92,18 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
             const year = (item.release_date || item.first_air_date || "").split("-")[0];
 
             return {
-                id: imdbId,
+                id: rawImdbId,
                 type: isSeries ? "series" : "movie",
                 name: isSeries ? item.name : item.title,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
-                description: item.overview,
+                description: item.overview || "",
                 releaseInfo: year,
                 imdbRating: rating,
                 links: [
                     {
-                        name: "IMDb",
+                        name: rating ? `${rating} IMDb` : "IMDb",
                         category: "imdb",
-                        url: `https://www.imdb.com/title/${imdbId}/`
+                        url: `https://www.imdb.com/title/${rawImdbId}/`
                     }
                 ]
             };
