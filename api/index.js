@@ -7,10 +7,10 @@ const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "2.4.0",
+    "version": "2.5.0",
     "name": "TasteProfile 10-Catalog Engine",
-    "description": "Deep post-2005 catalogs with IMDb badges, ratings, and direct links.",
-    "resources": ["catalog"],
+    "description": "Deep post-2005 catalogs with native IMDb badges, metadata, and direct links.",
+    "resources": ["catalog", "meta"],
     "types": ["movie", "series"],
     "catalogs": [
         { "type": "movie", "id": "cat_mind_bending", "name": "🧠 Mind-Bending & High-Concept" },
@@ -66,7 +66,7 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Convert TMDB items to Stremio metas with explicit IMDb badge, rating, and links
+// Convert TMDB items into clean preview metas
 async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
 
@@ -78,17 +78,14 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
             );
             const rawImdbId = extRes.data ? extRes.data.imdb_id : null;
 
-            // Strict check: must match standard tt... format
             if (!rawImdbId || !/^tt\d{7,8}$/.test(rawImdbId)) {
                 return null;
             }
 
-            // Exclude already watched
             if (ratedSet.has(rawImdbId)) {
                 return null;
             }
 
-            const rating = item.vote_average ? item.vote_average.toFixed(1) : null;
             const year = (item.release_date || item.first_air_date || "").split("-")[0];
 
             return {
@@ -97,15 +94,7 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
                 name: isSeries ? item.name : item.title,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
                 description: item.overview || "",
-                releaseInfo: year,
-                imdbRating: rating,
-                links: [
-                    {
-                        name: rating ? `${rating} IMDb` : "IMDb",
-                        category: "imdb",
-                        url: `https://www.imdb.com/title/${rawImdbId}/`
-                    }
-                ]
+                releaseInfo: year
             };
         } catch {
             return null;
@@ -137,6 +126,7 @@ async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, total
     return combined;
 }
 
+// 1. CATALOG HANDLER
 builder.defineCatalogHandler(async ({ type, id }) => {
     try {
         const ratedIds = await getRatedImdbIds(IMDB_PROFILE_ID);
@@ -187,6 +177,56 @@ builder.defineCatalogHandler(async ({ type, id }) => {
     } catch (err) {
         console.error(`Catalog error on ${id}:`, err.message);
         return { metas: [] };
+    }
+});
+
+// 2. META HANDLER (Powers the detail view with the yellow IMDb badge and link)
+builder.defineMetaHandler(async ({ type, id }) => {
+    try {
+        // Find TMDB ID from IMDb ID
+        const findUrl = `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+        const { data: findData } = await axios.get(findUrl, { timeout: 3000 });
+
+        const isSeries = (type === "series");
+        const details = isSeries 
+            ? (findData.tv_results && findData.tv_results[0]) 
+            : (findData.movie_results && findData.movie_results[0]);
+
+        if (!details) return { meta: null };
+
+        // Query deep details for runtime and genres
+        const detailsEndpoint = isSeries ? `tv/${details.id}` : `movie/${details.id}`;
+        const { data: full } = await axios.get(`https://api.themoviedb.org/3/${detailsEndpoint}?api_key=${TMDB_API_KEY}`, { timeout: 3000 });
+
+        const rating = full.vote_average ? full.vote_average.toFixed(1) : null;
+        const genres = (full.genres || []).map(g => g.name);
+        const runtime = full.runtime ? `${full.runtime} min` : null;
+        const year = (full.release_date || full.first_air_date || "").split("-")[0];
+
+        const meta = {
+            id: id,
+            type: isSeries ? "series" : "movie",
+            name: isSeries ? full.name : full.title,
+            genres: genres,
+            poster: full.poster_path ? `https://image.tmdb.org/t/p/w500${full.poster_path}` : null,
+            background: full.backdrop_path ? `https://image.tmdb.org/t/p/original${full.backdrop_path}` : null,
+            description: full.overview || "",
+            releaseInfo: year,
+            runtime: runtime,
+            imdbRating: rating,
+            links: [
+                {
+                    name: rating ? `${rating}` : "IMDb",
+                    category: "imdb",
+                    url: `https://www.imdb.com/title/${id}/`
+                }
+            ]
+        };
+
+        return { meta };
+    } catch (err) {
+        console.error(`Meta error on ${id}:`, err.message);
+        return { meta: null };
     }
 });
 
