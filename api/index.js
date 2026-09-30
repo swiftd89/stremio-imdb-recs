@@ -7,9 +7,9 @@ const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "2.1.0",
+    "version": "2.2.0",
     "name": "TasteProfile 10-Catalog Engine",
-    "description": "Personalized, deep, modern catalogs (post-2005) filtered against your IMDb watch history.",
+    "description": "Personalized, deep, modern catalogs (post-2005) with active IMDb watch-history exclusion.",
     "resources": ["catalog"],
     "types": ["movie", "series"],
     "catalogs": [
@@ -36,7 +36,7 @@ let lastFetch = 0;
 
 async function getRatedImdbIds(userId) {
     const now = Date.now();
-    if (cachedRatedIds && (now - lastFetch < 1000 * 60 * 30)) {
+    if (cachedRatedIds && (now - lastFetch < 1000 * 60 * 20)) {
         return cachedRatedIds;
     }
 
@@ -47,7 +47,7 @@ async function getRatedImdbIds(userId) {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9"
             },
-            timeout: 4500
+            timeout: 5000
         });
 
         const $ = cheerio.load(data);
@@ -66,19 +66,24 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Parallel resolver with throttling to build dozens of metas quickly
-async function resolveToStremioMetas(results, isSeries = false, limit = 50) {
-    const sliced = results.slice(0, limit);
+// Converts TMDB results to Stremio metas, filtering OUT items found in ratedSet
+async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
+    const metas = [];
 
-    const promises = sliced.map(async (item) => {
+    // Parallel lookups in chunks to prevent Vercel serverless timeouts
+    const promises = results.map(async (item) => {
         try {
             const extRes = await axios.get(
                 `https://api.themoviedb.org/3/${endpoint}/${item.id}/external_ids?api_key=${TMDB_API_KEY}`,
                 { timeout: 2500 }
             );
-            const imdbId = extRes.data.imdb_id;
-            if (!imdbId) return null;
+            const imdbId = extRes.data ? extRes.data.imdb_id : null;
+
+            // STRICT FILTER: must have an IMDb ID AND must not be already rated
+            if (!imdbId || ratedSet.has(imdbId)) {
+                return null;
+            }
 
             return {
                 id: imdbId,
@@ -94,24 +99,24 @@ async function resolveToStremioMetas(results, isSeries = false, limit = 50) {
     });
 
     const resolved = await Promise.all(promises);
-    return resolved.filter(Boolean);
+    return resolved.filter(Boolean).slice(0, limit);
 }
 
-// Helper to fetch multiple pages from TMDB to deliver dozens of titles
-async function fetchMultiPage(baseParams, isSeries = false, pages = 3) {
+// Multi-page fetcher with configurable starting page
+async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, totalPages = 3) {
     const endpoint = isSeries ? "tv" : "movie";
     const dateParam = isSeries ? "first_air_date.gte=2006-01-01" : "primary_release_date.gte=2006-01-01";
     let combined = [];
 
     const pagePromises = [];
-    for (let p = 1; p <= pages; p++) {
+    for (let p = startPage; p < startPage + totalPages; p++) {
         const url = `https://api.themoviedb.org/3/discover/${endpoint}?api_key=${TMDB_API_KEY}&${baseParams}&${dateParam}&page=${p}`;
         pagePromises.push(axios.get(url, { timeout: 3500 }).catch(() => ({ data: { results: [] } })));
     }
 
     const responses = await Promise.all(pagePromises);
     responses.forEach(res => {
-        if (res.data && res.data.results) {
+        if (res.data && Array.isArray(res.data.results)) {
             combined = combined.concat(res.data.results);
         }
     });
@@ -126,6 +131,7 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 
         let baseQuery = "";
         let isSeries = (type === "series");
+        let startPage = 1;
 
         if (id === "cat_mind_bending") {
             baseQuery = "with_genres=878,9648&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
@@ -152,8 +158,9 @@ builder.defineCatalogHandler(async ({ type, id }) => {
             baseQuery = "with_people=525|137427|7467|240|5655|12453&vote_average.gte=7.4&sort_by=vote_average.desc";
         } 
         else if (id === "cat_smart_wildcard") {
-            const randomPageOffset = Math.floor(Math.random() * 4) + 1;
-            baseQuery = `with_genres=878|53|9648&vote_average.gte=7.4&vote_count.gte=800&page=${randomPageOffset}&sort_by=vote_average.desc`;
+            // Pick a safe random page offset without malforming URL params
+            startPage = Math.floor(Math.random() * 3) + 1;
+            baseQuery = "with_genres=878|53|9648&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
         } 
         else if (id === "cat_prestige_series") {
             baseQuery = "with_genres=18,9648&vote_average.gte=8.0&vote_count.gte=300&sort_by=vote_average.desc";
@@ -161,13 +168,11 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 
         if (!baseQuery) return { metas: [] };
 
-        const rawResults = await fetchMultiPage(baseQuery, isSeries, 3);
+        // Fetch 3 pages (~60 items)
+        const rawResults = await fetchMultiPage(baseQuery, isSeries, startPage, 3);
 
-        // Filter out already rated movies
-        const unrated = rawResults.filter(item => !ratedSet.has(item.id));
-
-        // Resolve up to 50 titles per catalog
-        const metas = await resolveToStremioMetas(unrated, isSeries, 50);
+        // Resolve IMDb IDs and discard any matching ratedSet
+        const metas = await resolveToStremioMetas(rawResults, ratedSet, isSeries, 50);
         return { metas };
 
     } catch (err) {
