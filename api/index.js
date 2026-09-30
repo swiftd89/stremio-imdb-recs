@@ -7,9 +7,9 @@ const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "2.2.0",
+    "version": "2.3.0",
     "name": "TasteProfile 10-Catalog Engine",
-    "description": "Personalized, deep, modern catalogs (post-2005) with active IMDb watch-history exclusion.",
+    "description": "Deep post-2005 catalogs with IMDb badges, watch-history exclusion, and direct links.",
     "resources": ["catalog"],
     "types": ["movie", "series"],
     "catalogs": [
@@ -66,12 +66,10 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Converts TMDB results to Stremio metas, filtering OUT items found in ratedSet
+// Convert TMDB items to Stremio metas including imdbRating and external links
 async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
-    const metas = [];
 
-    // Parallel lookups in chunks to prevent Vercel serverless timeouts
     const promises = results.map(async (item) => {
         try {
             const extRes = await axios.get(
@@ -80,10 +78,12 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
             );
             const imdbId = extRes.data ? extRes.data.imdb_id : null;
 
-            // STRICT FILTER: must have an IMDb ID AND must not be already rated
             if (!imdbId || ratedSet.has(imdbId)) {
                 return null;
             }
+
+            const rating = item.vote_average ? item.vote_average.toFixed(1) : null;
+            const year = (item.release_date || item.first_air_date || "").split("-")[0];
 
             return {
                 id: imdbId,
@@ -91,7 +91,15 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
                 name: isSeries ? item.name : item.title,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
                 description: item.overview,
-                releaseInfo: (item.release_date || item.first_air_date || "").split("-")[0]
+                releaseInfo: year,
+                imdbRating: rating,
+                links: [
+                    {
+                        name: "IMDb",
+                        category: "imdb",
+                        url: `https://www.imdb.com/title/${imdbId}/`
+                    }
+                ]
             };
         } catch {
             return null;
@@ -102,7 +110,6 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
     return resolved.filter(Boolean).slice(0, limit);
 }
 
-// Multi-page fetcher with configurable starting page
 async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, totalPages = 3) {
     const endpoint = isSeries ? "tv" : "movie";
     const dateParam = isSeries ? "first_air_date.gte=2006-01-01" : "primary_release_date.gte=2006-01-01";
@@ -158,7 +165,6 @@ builder.defineCatalogHandler(async ({ type, id }) => {
             baseQuery = "with_people=525|137427|7467|240|5655|12453&vote_average.gte=7.4&sort_by=vote_average.desc";
         } 
         else if (id === "cat_smart_wildcard") {
-            // Pick a safe random page offset without malforming URL params
             startPage = Math.floor(Math.random() * 3) + 1;
             baseQuery = "with_genres=878|53|9648&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
         } 
@@ -168,10 +174,7 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 
         if (!baseQuery) return { metas: [] };
 
-        // Fetch 3 pages (~60 items)
         const rawResults = await fetchMultiPage(baseQuery, isSeries, startPage, 3);
-
-        // Resolve IMDb IDs and discard any matching ratedSet
         const metas = await resolveToStremioMetas(rawResults, ratedSet, isSeries, 50);
         return { metas };
 
