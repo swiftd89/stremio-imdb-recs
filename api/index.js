@@ -5,32 +5,43 @@ const cheerio = require("cheerio");
 const TMDB_API_KEY = "d659c9a6006168cfeee99cd51cad6623";
 const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
-// Strictly declare CATALOG only so Cinemeta handles all badges, ratings, and links
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "2.6.0",
-    "name": "TasteProfile 10-Catalog Engine",
-    "description": "Deep post-2005 catalogs filtered against your IMDb watch history.",
+    "version": "3.0.0",
+    "name": "TasteProfile Precision Engine",
+    "description": "High-concept psychological thrillers, grounded sci-fi, and airtight European mysteries (No anime, no space opera).",
     "resources": ["catalog"],
     "types": ["movie", "series"],
     "catalogs": [
-        { "type": "movie", "id": "cat_mind_bending", "name": "🧠 Mind-Bending & High-Concept" },
-        { "type": "movie", "id": "cat_psych_thriller", "name": "🕵️ Psychological & Tense Thrillers" },
-        { "type": "movie", "id": "cat_hidden_gems", "name": "💎 Hidden Gems (Under-The-Radar)" },
-        { "type": "movie", "id": "cat_space_scifi", "name": "🌌 Hard Sci-Fi & Speculative Realism" },
-        { "type": "movie", "id": "cat_masterpieces", "name": "🏆 Modern Masterpieces (8.0+)" },
-        { "type": "movie", "id": "cat_dark_noir", "name": "🌪️ Dark Neo-Noir & Gritty Crime" },
-        { "type": "movie", "id": "cat_timeloop_reality", "name": "⏳ Non-Linear & Alternate Realities" },
-        { "type": "movie", "id": "cat_director_vision", "name": "🎬 Visionary Auteur Cinema" },
-        { "type": "movie", "id": "cat_smart_wildcard", "name": "🎲 Smart Taste Wildcard" },
-        { "type": "series", "id": "cat_prestige_series", "name": "📺 Prestige Miniseries & Drama" }
+        { "type": "movie", "id": "cat_grounded_scifi", "name": "🧠 Grounded Sci-Fi & Time Causality" },
+        { "type": "movie", "id": "cat_tight_thrillers", "name": "🕵️ Airtight Mysteries & Twists" },
+        { "type": "movie", "id": "cat_dark_character", "name": "🃏 Intense Psychological Studies" },
+        { "type": "movie", "id": "cat_forensic_crime", "name": "🔍 Gritty Procedural & Investigation" },
+        { "type": "movie", "id": "cat_euro_mystery", "name": "🇪🇺 European Neo-Thrillers & Puzzles" },
+        { "type": "movie", "id": "cat_tense_survival", "name": "⚡ High-Stakes Pressure Cookers" },
+        { "type": "movie", "id": "cat_modern_noir", "name": "🌧️ Modern Gritty Neo-Noir" },
+        { "type": "movie", "id": "cat_clever_heist", "name": "♟️ Calculated Mind Games & Schemes" },
+        { "type": "movie", "id": "cat_fresh_wildcard", "name": "🎲 Dynamic Psychological Shuffle" },
+        { "type": "series", "id": "cat_prestige_series", "name": "📺 Tight Mystery & Thriller Series" }
     ],
     "idPrefixes": ["tt"]
 };
 
 const builder = new addonBuilder(manifest);
 
-const FALLBACK_FAVORITES = ["tt1375666", "tt0816692", "tt0468569", "tt0110912", "tt0137523", "tt0111161", "tt0062622", "tt2096673"];
+// Seed titles from user's explicit favorites
+const FALLBACK_FAVORITES = [
+    "tt1375666", // Inception
+    "tt0816692", // Interstellar
+    "tt0482571", // The Prestige
+    "tt2543164", // Arrival
+    "tt0945513", // Source Code
+    "tt7286456", // Joker
+    "tt1189340", // The Skin I Live In
+    "tt17009710", // Anatomy of a Fall
+    "tt6908274", // Mirage
+    "tt1219289"  // Limitless
+];
 
 let cachedRatedIds = null;
 let lastFetch = 0;
@@ -67,38 +78,41 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Convert TMDB results into clean Cinemeta-compatible preview items
+// Global hard filters applied across every TMDB request:
+// - without_genres=16 (NO ANIMATION/ANIME), 99 (NO DOCUMENTARIES/MAKING-OF)
+// - without_keywords=161176,9882,3801 (NO Space Opera, Star Trek, Space Battles)
+// - without_original_language=ja,ko,zh (NO Anime/Manga adaptations or Asian drama)
+const HARD_EXCLUSIONS = "&without_genres=16,99&without_keywords=161176,9882,3801&without_original_language=ja,ko,zh";
+
 async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
 
     const promises = results.map(async (item) => {
         try {
+            // Guard: double filter animation, documentaries, and Asian originals if leaked
+            if (item.genre_ids && (item.genre_ids.includes(16) || item.genre_ids.includes(99))) return null;
+            if (["ja", "ko", "zh"].includes(item.original_language)) return null;
+
             const extRes = await axios.get(
                 `https://api.themoviedb.org/3/${endpoint}/${item.id}/external_ids?api_key=${TMDB_API_KEY}`,
                 { timeout: 2500 }
             );
             const rawImdbId = extRes.data ? extRes.data.imdb_id : null;
 
-            // Must be a valid standard IMDb ID
-            if (!rawImdbId || !/^tt\d{7,8}$/.test(rawImdbId)) {
-                return null;
-            }
-
-            // Exclude already rated
-            if (ratedSet.has(rawImdbId)) {
-                return null;
-            }
+            if (!rawImdbId || !/^tt\d{7,8}$/.test(rawImdbId)) return null;
+            if (ratedSet.has(rawImdbId)) return null;
 
             const year = (item.release_date || item.first_air_date || "").split("-")[0];
+            const rating = item.vote_average ? item.vote_average.toFixed(1) : null;
 
-            // Pure Stremio catalog item: Stremio pairs this ID with Cinemeta for ratings & badges
             return {
                 id: rawImdbId,
                 type: isSeries ? "series" : "movie",
                 name: isSeries ? item.name : item.title,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
                 description: item.overview || "",
-                releaseInfo: year
+                releaseInfo: year,
+                imdbRating: rating
             };
         } catch {
             return null;
@@ -109,14 +123,15 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
     return resolved.filter(Boolean).slice(0, limit);
 }
 
-async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, totalPages = 3) {
+// Fetches 3 pages while applying random starting page offsets to keep catalogs fresh
+async function fetchMultiPage(baseParams, isSeries = false, basePage = 1, totalPages = 3) {
     const endpoint = isSeries ? "tv" : "movie";
     const dateParam = isSeries ? "first_air_date.gte=2006-01-01" : "primary_release_date.gte=2006-01-01";
     let combined = [];
 
     const pagePromises = [];
-    for (let p = startPage; p < startPage + totalPages; p++) {
-        const url = `https://api.themoviedb.org/3/discover/${endpoint}?api_key=${TMDB_API_KEY}&${baseParams}&${dateParam}&page=${p}`;
+    for (let p = basePage; p < basePage + totalPages; p++) {
+        const url = `https://api.themoviedb.org/3/discover/${endpoint}?api_key=${TMDB_API_KEY}&${baseParams}&${dateParam}${HARD_EXCLUSIONS}&page=${p}`;
         pagePromises.push(axios.get(url, { timeout: 3500 }).catch(() => ({ data: { results: [] } })));
     }
 
@@ -127,7 +142,8 @@ async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, total
         }
     });
 
-    return combined;
+    // Shuffle within the batch for constant refresh
+    return combined.sort(() => Math.random() - 0.5);
 }
 
 builder.defineCatalogHandler(async ({ type, id }) => {
@@ -137,43 +153,53 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 
         let baseQuery = "";
         let isSeries = (type === "series");
-        let startPage = 1;
+        // Dynamic random page window (1 to 4) so recommendations refresh on every request
+        const dynamicStartPage = Math.floor(Math.random() * 4) + 1;
 
-        if (id === "cat_mind_bending") {
-            baseQuery = "with_genres=878,9648&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
+        if (id === "cat_grounded_scifi") {
+            // Source Code / Arrival style: Time loops, paradoxes, high concept without space operas
+            baseQuery = "with_genres=878,9648&vote_average.gte=7.1&vote_count.gte=600&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_psych_thriller") {
-            baseQuery = "with_genres=53,9648&without_genres=28,12&vote_average.gte=7.3&vote_count.gte=800&sort_by=vote_average.desc";
+        else if (id === "cat_tight_thrillers") {
+            // The Prestige / Mirage / The Body style: Airtight plot twists & mystery
+            baseQuery = "with_genres=9648,53&without_genres=28,12&vote_average.gte=7.2&vote_count.gte=700&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_hidden_gems") {
-            baseQuery = "vote_average.gte=7.4&vote_count.gte=300&vote_count.lte=4500&sort_by=vote_average.desc";
+        else if (id === "cat_dark_character") {
+            // Joker / The Skin I Live In style: Dark psychological drama & obsession
+            baseQuery = "with_genres=18,53&without_genres=28&vote_average.gte=7.3&vote_count.gte=800&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_space_scifi") {
-            baseQuery = "with_genres=878&with_keywords=9882|3801|161176|14901&vote_average.gte=7.0&vote_count.gte=300&sort_by=vote_average.desc";
+        else if (id === "cat_forensic_crime") {
+            // Zodiac / Wind River style: Deep investigation, cold cases, realistic police procedure
+            baseQuery = "with_genres=80,9648,53&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_masterpieces") {
-            baseQuery = "vote_average.gte=8.0&vote_count.gte=1500&sort_by=vote_average.desc";
+        else if (id === "cat_euro_mystery") {
+            // Anatomy of a Fall / Spanish & French thriller puzzles (Oriol Paulo vibes)
+            baseQuery = "with_original_language=es|fr|de|it|da&with_genres=9648,53&vote_average.gte=7.0&vote_count.gte=200&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_dark_noir") {
-            baseQuery = "with_genres=80,53&vote_average.gte=7.3&vote_count.gte=600&sort_by=popularity.desc";
+        else if (id === "cat_tense_survival") {
+            // Contained, nerve-wracking suspense (e.g. Locke, Buried, Room, Misery style)
+            baseQuery = "with_genres=53&without_genres=28,14&vote_average.gte=7.2&vote_count.gte=500&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_timeloop_reality") {
-            baseQuery = "with_genres=878&with_keywords=4379|1930|9882&vote_average.gte=6.9&vote_count.gte=300&sort_by=vote_average.desc";
+        else if (id === "cat_modern_noir") {
+            // Gritty, cynical urban crime (No Country, Nightcrawler, Prisoners style)
+            baseQuery = "with_genres=80,18&without_genres=35,10749&vote_average.gte=7.3&vote_count.gte=800&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_director_vision") {
-            baseQuery = "with_people=525|137427|7467|240|5655|12453&vote_average.gte=7.4&sort_by=vote_average.desc";
+        else if (id === "cat_clever_heist") {
+            // Calculated schemes and mind games (Inside Man, Focus style)
+            baseQuery = "with_genres=80,53&with_keywords=10051|642|10182&vote_average.gte=6.9&vote_count.gte=400&sort_by=vote_average.desc";
         } 
-        else if (id === "cat_smart_wildcard") {
-            startPage = Math.floor(Math.random() * 3) + 1;
-            baseQuery = "with_genres=878|53|9648&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
+        else if (id === "cat_fresh_wildcard") {
+            // Deep randomized pull across all high-rated psychological mystery/sci-fi
+            const deepPage = Math.floor(Math.random() * 8) + 1;
+            baseQuery = `with_genres=9648,53&vote_average.gte=7.2&vote_count.gte=400&sort_by=popularity.desc&page=${deepPage}`;
         } 
         else if (id === "cat_prestige_series") {
-            baseQuery = "with_genres=18,9648&vote_average.gte=8.0&vote_count.gte=300&sort_by=vote_average.desc";
+            baseQuery = "with_genres=18,9648&vote_average.gte=7.8&vote_count.gte=250&sort_by=vote_average.desc";
         }
 
         if (!baseQuery) return { metas: [] };
 
-        const rawResults = await fetchMultiPage(baseQuery, isSeries, startPage, 3);
+        const rawResults = await fetchMultiPage(baseQuery, isSeries, dynamicStartPage, 3);
         const metas = await resolveToStremioMetas(rawResults, ratedSet, isSeries, 50);
         return { metas };
 
