@@ -2,14 +2,14 @@ const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const axios = require("axios");
 
 const TMDB_API_KEY = "d659c9a6006168cfeee99cd51cad6623";
-const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
+// STRICTLY declare catalog only so Cinemeta handles the detail screen and yellow badge
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "3.2.0",
+    "version": "4.0.0",
     "name": "TasteProfile Precision Engine",
-    "description": "Post-2005 psychological thrillers, grounded sci-fi & European puzzles with verified watch-history exclusion.",
-    "resources": ["catalog", "meta"],
+    "description": "Post-2005 psychological thrillers, grounded sci-fi & European puzzles.",
+    "resources": ["catalog"],
     "types": ["movie", "series"],
     "catalogs": [
         { "type": "movie", "id": "cat_grounded_scifi", "name": "🧠 Grounded Sci-Fi & Time Causality" },
@@ -28,54 +28,62 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-let cachedRatedSet = null;
-let lastFetchTime = 0;
+// Explicit list of your watched/favorite titles to guarantee exclusion
+const WATCHED_TITLES = new Set([
+    "tt0482571", // The Prestige
+    "tt2543164", // Arrival
+    "tt0945513", // Source Code
+    "tt7286456", // Joker
+    "tt1189340", // The Skin I Live In
+    "tt17009710", // Anatomy of a Fall
+    "tt6908274", // Mirage
+    "tt1219289", // Limitless
+    "tt1375666", // Inception
+    "tt0816692", // Interstellar
+    "tt0468569", // The Dark Knight
+    "tt1853728", // Django Unchained
+    "tt0110912", // Pulp Fiction
+    "tt0137523", // Fight Club
+    "tt0111161", // The Shawshank Redemption
+    "tt1877832", // X-Men: Days of Future Past
+    "tt2166834", // Batman: Dark Knight Returns Pt 2
+    "tt2313197", // Batman: Dark Knight Returns Pt 1
+    "tt0409459", // Watchmen
+    "tt10530176", // The Call
+    "tt2267998", // Gone Girl
+    "tt0477348", // No Country for Old Men
+    "tt0443706", // Zodiac
+    "tt3170832", // Room
+    "tt0405094", // The Lives of Others
+    "tt2084970", // The Imitation Game
+    "tt1130884", // Shutter Island
+    "tt0361748", // Inglourious Basterds
+    "tt1392190", // Mad Max: Fury Road
+    "tt0892791", // The Secret in Their Eyes
+    "tt5311514", // Your Name
+    "tt2278388", // The Grand Budapest Hotel
+    "tt0993846", // The Wolf of Wall Street
+    "tt1345836", // The Dark Knight Rises
+    "tt0407887", // The Departed
+    "tt0372784", // Batman Begins
+    "tt1856101", // Blade Runner 2049
+    "tt4779682", // Giant Little Ones
+    "tt10872600", // Spider-Man: No Way Home
+    "tt10366460", // CODA
+    "tt15671028", // Godzilla Minus One
+    "tt15398776", // Oppenheimer
+    "tt1517268", // Barbie
+    "tt9362722", // Spider-Man: Across the Spider-Verse
+    "tt6710474", // Everything Everywhere All at Once
+    "tt1160419"  // Dune
+]);
 
-// Universal IMDb extractor that captures IDs from both HTML and client JSON bundles
-async function getRatedImdbSet() {
-    const now = Date.now();
-    if (cachedRatedSet && (now - lastFetchTime < 1000 * 60 * 30)) {
-        return cachedRatedSet;
-    }
-
-    const collected = new Set();
-    // Seed confirmed user favorites so they never reappear
-    [
-        "tt0482571", "tt2543164", "tt0945513", "tt7286456", "tt1189340",
-        "tt17009710", "tt6908274", "tt1219289", "tt1375666", "tt0816692",
-        "tt0468569", "tt1853728", "tt0110912", "tt0137523", "tt0111161"
-    ].forEach(id => collected.add(id));
-
-    try {
-        const url = `https://www.imdb.com/user/${IMDB_PROFILE_ID}/ratings/`;
-        const res = await axios.get(url, {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            },
-            timeout: 5000
-        });
-
-        const html = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
-        const matches = html.match(/tt\d{7,8}/g);
-        if (matches) {
-            matches.forEach(id => collected.add(id));
-        }
-    } catch (e) {
-        console.error("IMDb history fetch fallback engaged");
-    }
-
-    cachedRatedSet = collected;
-    lastFetchTime = now;
-    return cachedRatedSet;
-}
-
+// Strip animations (16) and documentaries (99)
 const TMDB_EXCLUSIONS = "&without_genres=16,99";
 
-// Concurrent resolver with safety cap
-async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 40) {
+async function resolveToStremioMetas(results, isSeries = false, limit = 40) {
     const endpoint = isSeries ? "tv" : "movie";
 
-    // Eliminate animations, documentaries, and Asian originals
     const filtered = results.filter(item => {
         if (!item || !item.id) return false;
         if (item.genre_ids && (item.genre_ids.includes(16) || item.genre_ids.includes(99))) return false;
@@ -87,32 +95,23 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
         try {
             const extRes = await axios.get(
                 `https://api.themoviedb.org/3/${endpoint}/${item.id}/external_ids?api_key=${TMDB_API_KEY}`,
-                { timeout: 2200 }
+                { timeout: 2500 }
             );
             const imdbId = extRes.data ? extRes.data.imdb_id : null;
 
             if (!imdbId || !/^tt\d{7,8}$/.test(imdbId)) return null;
-            if (ratedSet.has(imdbId)) return null;
+            if (WATCHED_TITLES.has(imdbId)) return null;
 
             const year = (item.release_date || item.first_air_date || "").split("-")[0];
-            const rating = item.vote_average ? item.vote_average.toFixed(1) : "7.2";
 
+            // Return clean Stremio catalog item so Cinemeta attaches ratings and badges
             return {
                 id: imdbId,
                 type: isSeries ? "series" : "movie",
                 name: isSeries ? item.name : item.title,
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
                 description: item.overview || "",
-                releaseInfo: year,
-                imdbRating: rating,
-                genres: ["Thriller", "Mystery"],
-                links: [
-                    {
-                        name: `${rating} IMDb`,
-                        category: "imdb",
-                        url: `https://www.imdb.com/title/${imdbId}/`
-                    }
-                ]
+                releaseInfo: year
             };
         } catch {
             return null;
@@ -146,7 +145,6 @@ async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, total
 
 builder.defineCatalogHandler(async ({ type, id }) => {
     try {
-        const ratedSet = await getRatedImdbSet();
         let baseQuery = "";
         let isSeries = (type === "series");
         const startPage = Math.floor(Math.random() * 3) + 1;
@@ -186,59 +184,12 @@ builder.defineCatalogHandler(async ({ type, id }) => {
         if (!baseQuery) return { metas: [] };
 
         const raw = await fetchMultiPage(baseQuery, isSeries, startPage, 2);
-        const metas = await resolveToStremioMetas(raw, ratedSet, isSeries, 40);
+        const metas = await resolveToStremioMetas(raw, isSeries, 40);
         return { metas };
 
     } catch (err) {
         console.error(`Catalog error on ${id}:`, err.message);
         return { metas: [] };
-    }
-});
-
-// Meta handler returning standard detail metadata with the IMDb badge
-builder.defineMetaHandler(async ({ type, id }) => {
-    try {
-        const findUrl = `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
-        const { data: findData } = await axios.get(findUrl, { timeout: 2500 });
-
-        const isSeries = (type === "series");
-        const details = isSeries 
-            ? (findData.tv_results && findData.tv_results[0]) 
-            : (findData.movie_results && findData.movie_results[0]);
-
-        if (!details) return { meta: null };
-
-        const detailsEndpoint = isSeries ? `tv/${details.id}` : `movie/${details.id}`;
-        const { data: full } = await axios.get(`https://api.themoviedb.org/3/${detailsEndpoint}?api_key=${TMDB_API_KEY}`, { timeout: 2500 });
-
-        const rating = full.vote_average ? full.vote_average.toFixed(1) : null;
-        const genres = (full.genres || []).map(g => g.name);
-        const runtime = full.runtime ? `${full.runtime} min` : (full.episode_run_time && full.episode_run_time[0] ? `${full.episode_run_time[0]} min` : null);
-        const year = (full.release_date || full.first_air_date || "").split("-")[0];
-
-        return {
-            meta: {
-                id: id,
-                type: isSeries ? "series" : "movie",
-                name: isSeries ? full.name : full.title,
-                genres: genres,
-                poster: full.poster_path ? `https://image.tmdb.org/t/p/w500${full.poster_path}` : null,
-                background: full.backdrop_path ? `https://image.tmdb.org/t/p/original${full.backdrop_path}` : null,
-                description: full.overview || "",
-                releaseInfo: year,
-                runtime: runtime,
-                imdbRating: rating,
-                links: [
-                    {
-                        name: rating ? `${rating} IMDb` : "IMDb",
-                        category: "imdb",
-                        url: `https://www.imdb.com/title/${id}/`
-                    }
-                ]
-            }
-        };
-    } catch (err) {
-        return { meta: null };
     }
 });
 
