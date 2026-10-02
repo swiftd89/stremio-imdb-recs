@@ -7,10 +7,10 @@ const IMDB_PROFILE_ID = "p.k7ky5tvxj7vurvtblpjto6ck2a";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "name": "TasteProfile Precision Engine",
     "description": "High-concept psychological thrillers, grounded sci-fi, and airtight European mysteries (No anime, no space opera).",
-    "resources": ["catalog"],
+    "resources": ["catalog", "meta"],
     "types": ["movie", "series"],
     "catalogs": [
         { "type": "movie", "id": "cat_grounded_scifi", "name": "🧠 Grounded Sci-Fi & Time Causality" },
@@ -29,18 +29,9 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// Seed titles from user's explicit favorites
 const FALLBACK_FAVORITES = [
-    "tt1375666", // Inception
-    "tt0816692", // Interstellar
-    "tt0482571", // The Prestige
-    "tt2543164", // Arrival
-    "tt0945513", // Source Code
-    "tt7286456", // Joker
-    "tt1189340", // The Skin I Live In
-    "tt17009710", // Anatomy of a Fall
-    "tt6908274", // Mirage
-    "tt1219289"  // Limitless
+    "tt1375666", "tt0816692", "tt0482571", "tt2543164", "tt0945513",
+    "tt7286456", "tt1189340", "tt17009710", "tt6908274", "tt1219289"
 ];
 
 let cachedRatedIds = null;
@@ -78,21 +69,25 @@ async function getRatedImdbIds(userId) {
     }
 }
 
-// Global hard filters applied across every TMDB request:
-// - without_genres=16 (NO ANIMATION/ANIME), 99 (NO DOCUMENTARIES/MAKING-OF)
-// - without_keywords=161176,9882,3801 (NO Space Opera, Star Trek, Space Battles)
-// - without_original_language=ja,ko,zh (NO Anime/Manga adaptations or Asian drama)
-const HARD_EXCLUSIONS = "&without_genres=16,99&without_keywords=161176,9882,3801&without_original_language=ja,ko,zh";
+// Global query exclusions that TMDB natively supports:
+// without_genres=16 (No Animation/Anime), without_genres=99 (No Documentaries/Making-ofs)
+const TMDB_NATIVE_EXCLUSIONS = "&without_genres=16,99";
 
 async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit = 50) {
     const endpoint = isSeries ? "tv" : "movie";
 
-    const promises = results.map(async (item) => {
-        try {
-            // Guard: double filter animation, documentaries, and Asian originals if leaked
-            if (item.genre_ids && (item.genre_ids.includes(16) || item.genre_ids.includes(99))) return null;
-            if (["ja", "ko", "zh"].includes(item.original_language)) return null;
+    // Filter in JS to avoid TMDB 400 parameter errors:
+    // 1. Exclude animation (16) and documentaries (99)
+    // 2. Exclude East Asian language productions (ja, ko, zh)
+    const filtered = results.filter(item => {
+        if (!item || !item.id) return false;
+        if (item.genre_ids && (item.genre_ids.includes(16) || item.genre_ids.includes(99))) return false;
+        if (["ja", "ko", "zh"].includes(item.original_language)) return false;
+        return true;
+    });
 
+    const promises = filtered.map(async (item) => {
+        try {
             const extRes = await axios.get(
                 `https://api.themoviedb.org/3/${endpoint}/${item.id}/external_ids?api_key=${TMDB_API_KEY}`,
                 { timeout: 2500 }
@@ -112,7 +107,14 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
                 poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : null,
                 description: item.overview || "",
                 releaseInfo: year,
-                imdbRating: rating
+                imdbRating: rating,
+                links: [
+                    {
+                        name: rating ? `${rating} IMDb` : "IMDb",
+                        category: "imdb",
+                        url: `https://www.imdb.com/title/${rawImdbId}/`
+                    }
+                ]
             };
         } catch {
             return null;
@@ -123,15 +125,14 @@ async function resolveToStremioMetas(results, ratedSet, isSeries = false, limit 
     return resolved.filter(Boolean).slice(0, limit);
 }
 
-// Fetches 3 pages while applying random starting page offsets to keep catalogs fresh
-async function fetchMultiPage(baseParams, isSeries = false, basePage = 1, totalPages = 3) {
+async function fetchMultiPage(baseParams, isSeries = false, startPage = 1, totalPages = 3) {
     const endpoint = isSeries ? "tv" : "movie";
     const dateParam = isSeries ? "first_air_date.gte=2006-01-01" : "primary_release_date.gte=2006-01-01";
     let combined = [];
 
     const pagePromises = [];
-    for (let p = basePage; p < basePage + totalPages; p++) {
-        const url = `https://api.themoviedb.org/3/discover/${endpoint}?api_key=${TMDB_API_KEY}&${baseParams}&${dateParam}${HARD_EXCLUSIONS}&page=${p}`;
+    for (let p = startPage; p < startPage + totalPages; p++) {
+        const url = `https://api.themoviedb.org/3/discover/${endpoint}?api_key=${TMDB_API_KEY}&${baseParams}&${dateParam}${TMDB_NATIVE_EXCLUSIONS}&page=${p}`;
         pagePromises.push(axios.get(url, { timeout: 3500 }).catch(() => ({ data: { results: [] } })));
     }
 
@@ -142,7 +143,7 @@ async function fetchMultiPage(baseParams, isSeries = false, basePage = 1, totalP
         }
     });
 
-    // Shuffle within the batch for constant refresh
+    // Slight shuffle for dynamic discovery
     return combined.sort(() => Math.random() - 0.5);
 }
 
@@ -153,59 +154,106 @@ builder.defineCatalogHandler(async ({ type, id }) => {
 
         let baseQuery = "";
         let isSeries = (type === "series");
-        // Dynamic random page window (1 to 4) so recommendations refresh on every request
-        const dynamicStartPage = Math.floor(Math.random() * 4) + 1;
+        // Safe random window (1 to 2) so we never overshoot pagination into empty pages
+        const startPage = Math.floor(Math.random() * 2) + 1;
 
         if (id === "cat_grounded_scifi") {
-            // Source Code / Arrival style: Time loops, paradoxes, high concept without space operas
-            baseQuery = "with_genres=878,9648&vote_average.gte=7.1&vote_count.gte=600&sort_by=vote_average.desc";
+            // Source Code / Arrival / Time loop concepts (No space operas)
+            baseQuery = "with_genres=878,9648&vote_average.gte=6.8&vote_count.gte=300&sort_by=vote_average.desc";
         } 
         else if (id === "cat_tight_thrillers") {
-            // The Prestige / Mirage / The Body style: Airtight plot twists & mystery
-            baseQuery = "with_genres=9648,53&without_genres=28,12&vote_average.gte=7.2&vote_count.gte=700&sort_by=vote_average.desc";
+            // The Prestige / Mirage / The Body style plot twists
+            baseQuery = "with_genres=9648,53&without_genres=28,12&vote_average.gte=7.0&vote_count.gte=350&sort_by=vote_average.desc";
         } 
         else if (id === "cat_dark_character") {
-            // Joker / The Skin I Live In style: Dark psychological drama & obsession
-            baseQuery = "with_genres=18,53&without_genres=28&vote_average.gte=7.3&vote_count.gte=800&sort_by=vote_average.desc";
+            // Joker / The Skin I Live In style
+            baseQuery = "with_genres=18,53&without_genres=28&vote_average.gte=7.1&vote_count.gte=300&sort_by=vote_average.desc";
         } 
         else if (id === "cat_forensic_crime") {
-            // Zodiac / Wind River style: Deep investigation, cold cases, realistic police procedure
-            baseQuery = "with_genres=80,9648,53&vote_average.gte=7.2&vote_count.gte=600&sort_by=vote_average.desc";
+            // Zodiac / Wind River style investigations
+            baseQuery = "with_genres=80,9648,53&vote_average.gte=7.0&vote_count.gte=300&sort_by=vote_average.desc";
         } 
         else if (id === "cat_euro_mystery") {
-            // Anatomy of a Fall / Spanish & French thriller puzzles (Oriol Paulo vibes)
-            baseQuery = "with_original_language=es|fr|de|it|da&with_genres=9648,53&vote_average.gte=7.0&vote_count.gte=200&sort_by=vote_average.desc";
+            // Anatomy of a Fall / European thrillers (ES, FR, DE, IT)
+            baseQuery = "with_original_language=es|fr|de|it&with_genres=9648|53|80&vote_average.gte=6.8&vote_count.gte=80&sort_by=vote_average.desc";
         } 
         else if (id === "cat_tense_survival") {
-            // Contained, nerve-wracking suspense (e.g. Locke, Buried, Room, Misery style)
-            baseQuery = "with_genres=53&without_genres=28,14&vote_average.gte=7.2&vote_count.gte=500&sort_by=vote_average.desc";
+            // Pressure cookers and suspense
+            baseQuery = "with_genres=53&without_genres=28,14&vote_average.gte=6.9&vote_count.gte=250&sort_by=vote_average.desc";
         } 
         else if (id === "cat_modern_noir") {
-            // Gritty, cynical urban crime (No Country, Nightcrawler, Prisoners style)
-            baseQuery = "with_genres=80,18&without_genres=35,10749&vote_average.gte=7.3&vote_count.gte=800&sort_by=vote_average.desc";
+            // Gritty neo-noir & urban crime
+            baseQuery = "with_genres=80,18&without_genres=35,10749&vote_average.gte=7.1&vote_count.gte=350&sort_by=vote_average.desc";
         } 
         else if (id === "cat_clever_heist") {
-            // Calculated schemes and mind games (Inside Man, Focus style)
-            baseQuery = "with_genres=80,53&with_keywords=10051|642|10182&vote_average.gte=6.9&vote_count.gte=400&sort_by=vote_average.desc";
+            // Mind games & calculated schemes
+            baseQuery = "with_genres=80,53&vote_average.gte=6.8&vote_count.gte=250&sort_by=popularity.desc";
         } 
         else if (id === "cat_fresh_wildcard") {
-            // Deep randomized pull across all high-rated psychological mystery/sci-fi
-            const deepPage = Math.floor(Math.random() * 8) + 1;
-            baseQuery = `with_genres=9648,53&vote_average.gte=7.2&vote_count.gte=400&sort_by=popularity.desc&page=${deepPage}`;
+            // Broad shuffle of top-rated psychological thrillers
+            const wildcardPage = Math.floor(Math.random() * 4) + 1;
+            baseQuery = `with_genres=9648,53&vote_average.gte=7.0&vote_count.gte=200&sort_by=popularity.desc&page=${wildcardPage}`;
         } 
         else if (id === "cat_prestige_series") {
-            baseQuery = "with_genres=18,9648&vote_average.gte=7.8&vote_count.gte=250&sort_by=vote_average.desc";
+            baseQuery = "with_genres=18,9648&vote_average.gte=7.6&vote_count.gte=100&sort_by=vote_average.desc";
         }
 
         if (!baseQuery) return { metas: [] };
 
-        const rawResults = await fetchMultiPage(baseQuery, isSeries, dynamicStartPage, 3);
+        const rawResults = await fetchMultiPage(baseQuery, isSeries, startPage, 3);
         const metas = await resolveToStremioMetas(rawResults, ratedSet, isSeries, 50);
         return { metas };
 
     } catch (err) {
         console.error(`Catalog error on ${id}:`, err.message);
         return { metas: [] };
+    }
+});
+
+// Meta handler ensuring runtime, genres, rating, and badge appear on title click
+builder.defineMetaHandler(async ({ type, id }) => {
+    try {
+        const findUrl = `https://api.themoviedb.org/3/find/${id}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+        const { data: findData } = await axios.get(findUrl, { timeout: 3000 });
+
+        const isSeries = (type === "series");
+        const details = isSeries 
+            ? (findData.tv_results && findData.tv_results[0]) 
+            : (findData.movie_results && findData.movie_results[0]);
+
+        if (!details) return { meta: null };
+
+        const detailsEndpoint = isSeries ? `tv/${details.id}` : `movie/${details.id}`;
+        const { data: full } = await axios.get(`https://api.themoviedb.org/3/${detailsEndpoint}?api_key=${TMDB_API_KEY}`, { timeout: 3000 });
+
+        const rating = full.vote_average ? full.vote_average.toFixed(1) : null;
+        const genres = (full.genres || []).map(g => g.name);
+        const runtime = full.runtime ? `${full.runtime} min` : null;
+        const year = (full.release_date || full.first_air_date || "").split("-")[0];
+
+        const meta = {
+            id: id,
+            type: isSeries ? "series" : "movie",
+            name: isSeries ? full.name : full.title,
+            genres: genres,
+            poster: full.poster_path ? `https://image.tmdb.org/t/p/w500${full.poster_path}` : null,
+            background: full.backdrop_path ? `https://image.tmdb.org/t/p/original${full.backdrop_path}` : null,
+            description: full.overview || "",
+            releaseInfo: year,
+            runtime: runtime,
+            imdbRating: rating,
+            links: [
+                {
+                    name: rating ? `${rating} IMDb` : "IMDb",
+                    category: "imdb",
+                    url: `https://www.imdb.com/title/${id}/`
+                }
+            ]
+        };
+
+        return { meta };
+    } catch (err) {
+        return { meta: null };
     }
 });
 
