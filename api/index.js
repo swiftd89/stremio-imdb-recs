@@ -5,7 +5,7 @@ const TMDB_API_KEY = "d659c9a6006168cfeee99cd51cad6623";
 
 const manifest = {
     "id": "org.myself.imdb.tasteprofile.curator",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "name": "TasteProfile Precision Engine",
     "description": "Post-2005 psychological thrillers, grounded sci-fi & European puzzles.",
     "resources": ["catalog"],
@@ -27,54 +27,17 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-// Explicit exclusion set: loved/already watched titles
 const WATCHED_TITLES = new Set([
-    "tt0482571", // The Prestige
-    "tt2543164", // Arrival
-    "tt0945513", // Source Code
-    "tt7286456", // Joker
-    "tt1189340", // The Skin I Live In
-    "tt17009710", // Anatomy of a Fall
-    "tt6908274", // Mirage
-    "tt1219289", // Limitless
-    "tt1375666", // Inception
-    "tt0816692", // Interstellar
-    "tt0468569", // The Dark Knight
-    "tt1853728", // Django Unchained
-    "tt0110912", // Pulp Fiction
-    "tt0137523", // Fight Club
-    "tt0111161", // The Shawshank Redemption
-    "tt1877832", // X-Men: Days of Future Past
-    "tt2166834", // Batman: Dark Knight Returns Pt 2
-    "tt2313197", // Batman: Dark Knight Returns Pt 1
-    "tt0409459", // Watchmen
-    "tt10530176", // The Call
-    "tt2267998", // Gone Girl
-    "tt0477348", // No Country for Old Men
-    "tt0443706", // Zodiac
-    "tt3170832", // Room
-    "tt0405094", // The Lives of Others
-    "tt2084970", // The Imitation Game
-    "tt1130884", // Shutter Island
-    "tt0361748", // Inglourious Basterds
-    "tt1392190", // Mad Max: Fury Road
-    "tt0892791", // The Secret in Their Eyes
-    "tt5311514", // Your Name
-    "tt2278388", // The Grand Budapest Hotel
-    "tt0993846", // The Wolf of Wall Street
-    "tt1345836", // The Dark Knight Rises
-    "tt0407887", // The Departed
-    "tt0372784", // Batman Begins
-    "tt1856101", // Blade Runner 2049
-    "tt4779682", // Giant Little Ones
-    "tt10872600", // Spider-Man: No Way Home
-    "tt10366460", // CODA
-    "tt15671028", // Godzilla Minus One
-    "tt15398776", // Oppenheimer
-    "tt1517268", // Barbie
-    "tt9362722", // Spider-Man: Across the Spider-Verse
-    "tt6710474", // Everything Everywhere All at Once
-    "tt1160419"  // Dune
+    "tt0482571", "tt2543164", "tt0945513", "tt7286456", "tt1189340",
+    "tt17009710", "tt6908274", "tt1219289", "tt1375666", "tt0816692",
+    "tt0468569", "tt1853728", "tt0110912", "tt0137523", "tt0111161",
+    "tt1877832", "tt2166834", "tt2313197", "tt0409459", "tt10530176",
+    "tt2267998", "tt0477348", "tt0443706", "tt3170832", "tt0405094",
+    "tt2084970", "tt1130884", "tt0361748", "tt1392190", "tt0892791",
+    "tt5311514", "tt2278388", "tt0993846", "tt1345836", "tt0407887",
+    "tt0372784", "tt1856101", "tt4779682", "tt10872600", "tt10366460",
+    "tt15671028", "tt15398776", "tt1517268", "tt9362722", "tt6710474",
+    "tt1160419"
 ]);
 
 // Strip animation (16) and documentaries (99)
@@ -145,54 +108,45 @@ builder.defineCatalogHandler(async ({ type, id }) => {
     try {
         let baseQuery = "";
         let isSeries = (type === "series");
-        // Modest page rotation between page 1 and 2 to ensure rich results without running dry
-        const startPage = Math.floor(Math.random() * 2) + 1;
+        let startPage = Math.floor(Math.random() * 2) + 1;
 
         if (id === "cat_grounded_scifi") {
-            // Broadened: Sci-Fi (878), no space opera keywords, vote average 6.5+ sorted by popularity
-            baseQuery = "with_genres=878&without_keywords=161176,9882,3801&vote_average.gte=6.5&vote_count.gte=200&sort_by=popularity.desc";
+            baseQuery = "with_genres=878&without_keywords=161176,9882,3801&vote_average.gte=6.3&vote_count.gte=150&sort_by=popularity.desc";
         } 
         else if (id === "cat_tight_thrillers") {
-            // Airtight Mystery (9648) or Thriller (53), vote average 6.8+
-            baseQuery = "with_genres=9648|53&vote_average.gte=6.8&vote_count.gte=250&sort_by=vote_average.desc";
+            baseQuery = "with_genres=9648|53&vote_average.gte=6.6&vote_count.gte=200&sort_by=vote_average.desc";
         } 
         else if (id === "cat_dark_character") {
-            // Dark Psychological drama (18, 53)
-            baseQuery = "with_genres=18,53&without_genres=28&vote_average.gte=6.8&vote_count.gte=250&sort_by=vote_average.desc";
+            // FIXED: Drama OR Thriller (18|53), dropped without_genres=28, loosened to 6.5+
+            baseQuery = "with_genres=18|53&vote_average.gte=6.5&vote_count.gte=150&sort_by=vote_average.desc";
         } 
         else if (id === "cat_forensic_crime") {
-            // Crime investigation / Procedural (80 with 9648 or 53)
-            baseQuery = "with_genres=80&vote_average.gte=6.7&vote_count.gte=200&sort_by=vote_average.desc";
+            baseQuery = "with_genres=80&vote_average.gte=6.6&vote_count.gte=150&sort_by=vote_average.desc";
         } 
         else if (id === "cat_euro_mystery") {
-            // European mystery/thrillers (ES, FR, DE, IT)
-            baseQuery = "with_original_language=es|fr|de|it&with_genres=9648|53&vote_average.gte=6.5&vote_count.gte=60&sort_by=vote_average.desc";
+            baseQuery = "with_original_language=es|fr|de|it&with_genres=9648|53&vote_average.gte=6.4&vote_count.gte=50&sort_by=vote_average.desc";
         } 
         else if (id === "cat_tense_survival") {
-            // Broadened: Pure Thriller (53) with vote count 150+ sorted by popularity
-            baseQuery = "with_genres=53&without_genres=14,28&vote_average.gte=6.5&vote_count.gte=150&sort_by=popularity.desc";
+            // FIXED: Thriller (53), removed restrictive exclusion tags, sorted by popularity
+            baseQuery = "with_genres=53&vote_average.gte=6.3&vote_count.gte=120&sort_by=popularity.desc";
         } 
         else if (id === "cat_modern_noir") {
-            // Broadened: Crime (80) with Drama (18) or Mystery (9648), vote average 6.7+
-            baseQuery = "with_genres=80&vote_average.gte=6.7&vote_count.gte=200&sort_by=popularity.desc";
+            baseQuery = "with_genres=80&vote_average.gte=6.6&vote_count.gte=150&sort_by=popularity.desc";
         } 
         else if (id === "cat_clever_heist") {
-            // Mind games & calculated schemes
-            baseQuery = "with_genres=80,53&vote_average.gte=6.6&vote_count.gte=150&sort_by=popularity.desc";
+            baseQuery = "with_genres=80,53&vote_average.gte=6.5&vote_count.gte=120&sort_by=popularity.desc";
         } 
         else if (id === "cat_fresh_wildcard") {
-            // Broadened shuffle across high-rated Mystery / Thriller / Sci-Fi
-            const wildcardPage = Math.floor(Math.random() * 3) + 1;
-            baseQuery = `with_genres=9648|53|878&without_keywords=161176,9882,3801&vote_average.gte=6.7&vote_count.gte=150&sort_by=popularity.desc&page=${wildcardPage}`;
+            // FIXED: Removed duplicate &page param from query string, set startPage cleanly
+            startPage = Math.floor(Math.random() * 3) + 1;
+            baseQuery = "with_genres=9648|53|878&without_keywords=161176,9882,3801&vote_average.gte=6.5&vote_count.gte=150&sort_by=popularity.desc";
         } 
         else if (id === "cat_prestige_series") {
-            // High-rated Mystery & Drama miniseries/shows
-            baseQuery = "with_genres=18,9648&vote_average.gte=7.4&vote_count.gte=80&sort_by=vote_average.desc";
+            baseQuery = "with_genres=18,9648&vote_average.gte=7.2&vote_count.gte=60&sort_by=vote_average.desc";
         }
 
         if (!baseQuery) return { metas: [] };
 
-        // Fetch 3 pages (~60 raw titles) to yield 30-45 vetted titles per catalog
         const raw = await fetchMultiPage(baseQuery, isSeries, startPage, 3);
         const metas = await resolveToStremioMetas(raw, isSeries, 50);
         return { metas };
